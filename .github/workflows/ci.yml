@@ -24,3 +24,17 @@ jobs:
           restore-keys: ${{ runner.os }}-build-
 
       - run: mix check
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      # Builds and boots real OTP releases, then hot-upgrades them — slow, so
+      # it's a separate job from the fast `check` suite.
+      - run: mix test --include e2e --only e2e

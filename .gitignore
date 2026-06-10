@@ -8,3 +8,6 @@ erl_crash.dump
 *.beam
 /config/*.secret.exs
 .elixir_ls/
+test/fixtures/*/_build/
+test/fixtures/*/deps/
+test/fixtures/*/mix.lock
