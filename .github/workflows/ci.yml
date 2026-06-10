@@ -14,7 +14,7 @@ jobs:
       - uses: erlef/setup-beam@v1
         with:
           otp-version: "28"
-          elixir-version: "1.19"
+          elixir-version: "1.20"
 
       - name: Restore build cache
         uses: actions/cache@v4
@@ -33,7 +33,7 @@ jobs:
       - uses: erlef/setup-beam@v1
         with:
           otp-version: "28"
-          elixir-version: "1.19"
+          elixir-version: "1.20"
 
       # Builds and boots real OTP releases, then hot-upgrades them — slow, so
       # it's a separate job from the fast `check` suite.
