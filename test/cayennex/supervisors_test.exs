@@ -112,7 +112,10 @@ defmodule Cayennex.SupervisorsTest do
 
   test "prune is idempotent — a second reconcile prunes nothing" do
     :persistent_term.put({DynSup, :children}, [])
-    assert [{DynSup, %{pruned: [:a]}}] = Supervisors.reconcile([{DynSup, DynSup, :ok, prune: true}])
+
+    assert [{DynSup, %{pruned: [:a]}}] =
+             Supervisors.reconcile([{DynSup, DynSup, :ok, prune: true}])
+
     assert [{DynSup, %{pruned: [], removed_kept: []}}] =
              Supervisors.reconcile([{DynSup, DynSup, :ok, prune: true}])
   end

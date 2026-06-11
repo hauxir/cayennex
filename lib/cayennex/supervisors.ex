@@ -60,8 +60,7 @@ defmodule Cayennex.Supervisors do
   @type entry ::
           module | {name, term} | {name, module, term} | {name, module, term, keyword}
   @type result ::
-          {name,
-           %{started: [term], pruned: [term], removed_kept: [term], errors: [{term, term}]}}
+          {name, %{started: [term], pruned: [term], removed_kept: [term], errors: [{term, term}]}}
           | {name, {:error, term}}
 
   @doc """
@@ -108,7 +107,8 @@ defmodule Cayennex.Supervisors do
          pruned: pruned,
          # ...left running and merely reported when prune is off — see moduledoc.
          removed_kept: removed_kept,
-         errors: Enum.map(add_errors ++ prune_errors, fn {id, {:error, reason}} -> {id, reason} end)
+         errors:
+           Enum.map(add_errors ++ prune_errors, fn {id, {:error, reason}} -> {id, reason} end)
        }}
     else
       {:error, reason} -> {name, {:error, reason}}
