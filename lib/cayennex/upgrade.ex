@@ -66,6 +66,7 @@ defmodule Cayennex.Upgrade do
         case :release_handler.install_release(vsn, update_paths: true) do
           {:ok, _, _} ->
             log("installed #{vsn}")
+            reconcile_supervisors()
             permafy(vsn)
 
           # soft_purge hit a process still running old code; the caller should
@@ -80,6 +81,31 @@ defmodule Cayennex.Upgrade do
       {:error, reason} ->
         fail(:check_install, reason)
     end
+  end
+
+  # New code is loaded by the relup, but cayennex strips the supervisor
+  # code_change, so a child newly ADDED to a (root) supervisor is loaded yet
+  # never started. Inject the additions now. Best-effort and never fatal: the
+  # release install already succeeded, so a reconcile hiccup must not block
+  # make_permanent — it's logged with a greppable marker for the deploy script /
+  # healthcheck to catch, same contract as the rest of install/1.
+  defp reconcile_supervisors do
+    for result <- Cayennex.Supervisors.reconcile() do
+      case result do
+        {name, {:error, reason}} ->
+          IO.puts("RECONCILE_FAILED #{name}: #{inspect(reason)}")
+
+        {name, %{started: started, pruned: pruned, errors: errors}} ->
+          if started != [], do: log("reconcile #{name}: started #{inspect(started)}")
+          if pruned != [], do: log("reconcile #{name}: pruned #{inspect(pruned)}")
+
+          for {id, reason} <- errors do
+            IO.puts("RECONCILE_FAILED #{name} child #{inspect(id)}: #{inspect(reason)}")
+          end
+      end
+    end
+
+    :ok
   end
 
   defp permafy(vsn) do

@@ -1,10 +1,15 @@
 defmodule Cayennex.HotUpgradeE2ETest do
   @moduledoc """
   End-to-end: build a real release of the `myapp` fixture, boot it as a daemon,
-  accumulate state, then drive a hot upgrade through `Cayennex.Deploy` +
+  accumulate state, then drive hot upgrades through `Cayennex.Deploy` +
   `Cayennex.Transport.Local` and assert the running node picked up new code —
-  both the app's own code AND a bumped dependency — WITHOUT losing the
-  GenServer's state or restarting.
+  the app's own code, a bumped dependency, AND supervision-tree changes — WITHOUT
+  losing the GenServer's state or restarting:
+
+    * v1 → v2: a brand-new service (`Myapp.Greeter`) wired into the root
+      supervisor's `init/1` is *started* on the running node.
+    * v2 → v3: that service, dropped from `init/1`, is *terminated + deleted* on
+      the running node (the supervisor is configured `prune: true`).
   """
   use ExUnit.Case, async: false
 
@@ -21,6 +26,7 @@ defmodule Cayennex.HotUpgradeE2ETest do
 
   @v1 "0.1.0+a1"
   @v2 "0.1.0+a2"
+  @v3 "0.1.0+a3"
   @dep_v1 "0.1.0"
   @dep_v2 "0.2.0"
 
@@ -29,6 +35,8 @@ defmodule Cayennex.HotUpgradeE2ETest do
     # reached by our `bin rpc` calls. Inherited by every System.cmd below
     # (helpers AND Cayennex.Transport.Local, which run in this VM's env).
     System.put_env("MYAPP_NODE", "myapp-#{System.unique_integer([:positive])}@127.0.0.1")
+    # v1 must NOT wire in the extra child; the v2 build flips this on.
+    System.delete_env("MYAPP_EXTRA_CHILD")
 
     counter0 = File.read!(@counter)
     depapp0 = File.read!(@depapp)
@@ -42,13 +50,14 @@ defmodule Cayennex.HotUpgradeE2ETest do
       _ = bin(rel_root, ["stop"])
       File.write!(@counter, counter0)
       File.write!(@depapp, depapp0)
+      System.delete_env("MYAPP_EXTRA_CHILD")
       File.rm_rf(work)
     end)
 
     %{store: store, rel_root: rel_root, build_dir: build_dir()}
   end
 
-  test "hot upgrade: app code + a bumped dependency go live, state survives, no restart",
+  test "hot upgrade: code + dep go live, a supervisor child is added (v2) then pruned (v3)",
        ctx do
     # --- v1: build, extract, boot -----------------------------------------
     set_label("v1")
@@ -68,22 +77,68 @@ defmodule Cayennex.HotUpgradeE2ETest do
     assert rpc(ctx.rel_root, "Myapp.Counter.label()") == "v1"
     assert rpc(ctx.rel_root, "Myapp.Counter.dep_tag()") == "v1"
     assert running_version(ctx.rel_root) == @v1
+    # the v2-only service does not exist on the node yet
+    assert rpc(ctx.rel_root, "inspect(Process.whereis(Myapp.Greeter))") == "nil"
 
     # --- v2: change app code + bump the dependency, drive the upgrade ------
     set_label("v2")
     set_dep_tag("v2")
     System.put_env("MYAPP_VSN", @v2)
     System.put_env("DEPAPP_VSN", @dep_v2)
+    # v2 wires a new child (Myapp.Greeter) into the root supervisor's init/1
+    System.put_env("MYAPP_EXTRA_CHILD", "1")
     # Clean build so the v2 release.hot stamps the right version and recompiles
     # every changed source — the old release comes from the store tarball, not
     # _build, so the relup base is unaffected.
     clean_build()
 
-    deploy = %Deploy{
+    assert :ok = Deploy.run(deploy(ctx, @v2))
+
+    # --- assert: app + dep code live, state survived, version flipped ------
+    assert running_version(ctx.rel_root) == @v2, "node should report the new version"
+    assert rpc(ctx.rel_root, "Myapp.Counter.label()") == "v2", "app's new code is live"
+    assert rpc(ctx.rel_root, "Myapp.Counter.dep_tag()") == "v2", "dependency hot-upgraded"
+    assert rpc(ctx.rel_root, "Myapp.Counter.get()") == "3", "state survived the upgrade"
+
+    assert rpc(ctx.rel_root, "Myapp.Greeter.hello()") == "greetings",
+           "a child added to the root supervisor in v2 was started on the running node"
+
+    # --- v3: drop the child from init/1, prune it on the running node ------
+    set_label("v3")
+    System.put_env("MYAPP_VSN", @v3)
+    # v3's compiled init/1 no longer lists Myapp.Greeter (extra child off again).
+    # The relup loads the new init/1 but never re-runs it, so Greeter keeps
+    # running until cayennex's prune (config: prune: true) terminates + deletes it.
+    System.delete_env("MYAPP_EXTRA_CHILD")
+    clean_build()
+
+    assert :ok = Deploy.run(deploy(ctx, @v3))
+
+    # --- assert: version flipped, child pruned, surviving state intact -----
+    assert running_version(ctx.rel_root) == @v3, "node should report the pruned version"
+    assert rpc(ctx.rel_root, "Myapp.Counter.label()") == "v3", "v3 app code is live"
+    assert rpc(ctx.rel_root, "Myapp.Counter.get()") == "3", "state survived the second upgrade"
+
+    assert rpc(ctx.rel_root, "inspect(Process.whereis(Myapp.Greeter))") == "nil",
+           "the child dropped from init/1 in v3 was terminated on the running node"
+
+    assert rpc(ctx.rel_root, "inspect(Supervisor.which_children(Myapp.RootSupervisor))") =~
+             "Myapp.Counter",
+           "the surviving Counter child is still supervised after the prune"
+
+    refute rpc(ctx.rel_root, "inspect(Supervisor.which_children(Myapp.RootSupervisor))") =~
+             "Greeter",
+           "the pruned child's spec was deleted, not left as a dead/restartable slot"
+  end
+
+  # --- helpers -------------------------------------------------------------
+
+  defp deploy(ctx, version) do
+    %Deploy{
       transport: Local,
       ctx: %{rel_root: ctx.rel_root, name: :myapp},
       release_name: :myapp,
-      version: @v2,
+      version: version,
       project_dir: @fixture,
       build_dir: ctx.build_dir,
       store_dir: ctx.store,
@@ -91,17 +146,7 @@ defmodule Cayennex.HotUpgradeE2ETest do
       verify_attempts: 30,
       verify_delay_ms: 1000
     }
-
-    assert :ok = Deploy.run(deploy)
-
-    # --- assert: app + dep code live, state survived, version flipped ------
-    assert running_version(ctx.rel_root) == @v2, "node should report the new version"
-    assert rpc(ctx.rel_root, "Myapp.Counter.label()") == "v2", "app's new code is live"
-    assert rpc(ctx.rel_root, "Myapp.Counter.dep_tag()") == "v2", "dependency hot-upgraded"
-    assert rpc(ctx.rel_root, "Myapp.Counter.get()") == "3", "state survived the upgrade"
   end
-
-  # --- helpers -------------------------------------------------------------
 
   defp set_label(label) do
     rewrite(@counter, ~r/@label "[^"]*"/, ~s|@label "#{label}"|)

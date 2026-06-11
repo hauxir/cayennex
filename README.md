@@ -41,6 +41,8 @@ This is the right trade only if you don't need state migration. If you do, use
 |---|---|
 | Your own module code (add / change / delete) | ✅ |
 | A changed or newly-added dependency application | ✅ |
+| A child **added** to a managed supervisor | ✅ started at runtime (opt-in, see below) |
+| A child **removed** from a managed supervisor | ✅ terminated at runtime with `prune: true`; otherwise reported and left running |
 | GenServer **state shape** changes | ⚠️ no migration — new code must tolerate old state |
 | ERTS (Erlang/OTP) version change | ❌ `{:error, :erts_changed}` → full deploy |
 
@@ -89,6 +91,53 @@ bin/my_app rpc 'Cayennex.Upgrade.install("<new_vsn>")'
 prints a greppable `UPGRADE_FAILED` marker. **Your deploy script's post-install
 version check is the source of truth**; on failure (including `:old_processes`),
 fall back to a full restart deploy.
+
+## Adding or removing a service in a supervisor without a restart
+
+A relup hot-loads new *code*, but because cayennex strips the supervisor
+`code_change` (the same strip that preserves state), OTP never re-runs your
+supervisor's `init/1` — so a child you **add** to a root supervisor between
+releases is compiled and loaded onto the node but never *started*, and a child
+you **remove** keeps running. The upgrade goes green but the supervision tree is
+unchanged.
+
+`Cayennex.Supervisors` closes that gap at runtime. List the supervisors it
+should manage:
+
+```elixir
+# config/runtime.exs (or config.exs)
+config :cayennex, :supervisors, [
+  Myapp.RootSupervisor,                            # registered name == callback module
+  {MyName, Myapp.OtherSupervisor, :ok},            # {registered_name, callback_module, init_arg}
+  {Myapp.PoolSupervisor, Myapp.PoolSupervisor, :ok, prune: true}  # also terminate removed children
+]
+```
+
+After every `Cayennex.Upgrade.install/1`, cayennex asks each listed supervisor's
+freshly hot-loaded `init/1` for its desired children, diffs against what's
+actually running (`Supervisor.which_children/1`), and `start_child`s the
+additions — logging `==> reconcile <Sup>: started [...]`.
+
+**Removal is opt-in, per supervisor.** By default reconcile is *add-only*: a
+child dropped from `init/1` is reported (`removed_kept`) but never terminated, on
+the assumption it may hold the live connections this node exists to keep. Pass
+`prune: true` (the 4th element of the full `{name, module, init_arg, opts}` form)
+and cayennex will instead `terminate_child` + `delete_child` the dropped children
+— logging `==> reconcile <Sup>: pruned [...]`. Only enable it for supervisors
+where terminating a removed child is actually safe.
+
+Neither adding nor pruning can block the install: a failure to start *or* prune
+a child prints a greppable `RECONCILE_FAILED` marker and reconcile moves on —
+your healthcheck should confirm the service is up (or gone), just as it confirms
+the version.
+
+Two requirements:
+
+- The supervisor must be a **named `use Supervisor` (or `:supervisor`) module**
+  with an `init/1` — an inline `Supervisor.start_link([...], ...)` in your
+  `Application` has no callback module to re-consult.
+- The configured `init_arg` must match what you pass to `Supervisor.start_link/3`
+  (it's what `init/1` turns into the child list; irrelevant if `init/1` ignores it).
 
 ## Operational notes (read these)
 
